@@ -1,4 +1,5 @@
 import os
+import requests
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -10,7 +11,6 @@ from linebot.v3.messaging import (
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-import google.generativeai as genai
 
 app = Flask(__name__)
 
@@ -20,7 +20,6 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-genai.configure(api_key=GEMINI_API_KEY)
 
 @app.route("/", methods=['GET'])
 def index():
@@ -42,7 +41,8 @@ def callback():
 def handle_message(event):
     user_text = event.message.text
 
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
     prompt = f"""
 以下のサッカースクールのメモテキストから、保護者・生徒向けの成長レポート文章を作成してください。
 
@@ -57,15 +57,32 @@ def handle_message(event):
 ■ 来月の目標
 (ここに150文字程度で記載)
 """
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ]
+    }
 
-    response = model.generate_content(prompt)
+    try:
+        res = requests.post(url, json=payload, headers=headers)
+        res_data = res.json()
+        
+        if res.status_code == 200:
+            reply_text = res_data['candidates'][0]['content']['parts'][0]['text']
+        else:
+            api_error = res_data.get('error', {}).get('message', 'APIエラーが発生しました')
+            reply_text = f"APIエラー: {api_error}"
+    except Exception as e:
+        reply_text = f"システムエラー: {str(e)}"
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=response.text)]
+                messages=[TextMessage(text=reply_text)]
             )
         )
 
