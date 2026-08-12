@@ -10,7 +10,7 @@ from linebot.v3.messaging import (
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from google import genai
+import google.generativeai as genai
 
 app = Flask(__name__)
 
@@ -20,6 +20,7 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+genai.configure(api_key=GEMINI_API_KEY)
 
 @app.route("/", methods=['GET'])
 def index():
@@ -41,7 +42,7 @@ def callback():
 def handle_message(event):
     user_text = event.message.text
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
 以下のサッカースクールのメモテキストから、保護者・生徒向けの成長レポート文章を作成してください。
 
@@ -57,10 +58,7 @@ def handle_message(event):
 (ここに150文字程度で記載)
 """
 
-    response = client.models.generate_content(
-        model='gemini-1.5-flash',
-        contents=prompt,
-    )
+    response = model.generate_content(prompt)
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
