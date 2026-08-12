@@ -10,8 +10,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage,
-    FileMessage
+    TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
@@ -141,21 +140,19 @@ def handle_message(event):
     else:
         file_name, file_path = create_excel_report(parsed_data)
         
-        summary_text = f"【{parsed_data.get('name', '生徒')}さんの成長レポートを作成しました】\n\n" \
-                       f"■今月の成長ポイント\n{parsed_data.get('growth_point', '')}\n\n" \
-                       f"■来月の目標\n{parsed_data.get('next_goal', '')}\n\n" \
-                       f"📎 Excelファイルを添付しました。"
-
         if file_name and file_path:
             file_url = f"{SERVER_BASE_URL}/files/{file_name}"
-            reply_messages = [
-                TextMessage(text=summary_text),
-                FileMessage(original_content_url=file_url, file_name=file_name)
-            ]
+            summary_text = f"【{parsed_data.get('name', '生徒')}さんの成長レポートを作成しました】\n\n" \
+                           f"■今月の成長ポイント\n{parsed_data.get('growth_point', '')}\n\n" \
+                           f"■来月の目標\n{parsed_data.get('next_goal', '')}\n\n" \
+                           f"📥 完成したExcelファイルのダウンロード:\n{file_url}"
         else:
-            reply_messages = [
-                TextMessage(text=summary_text + "\n※Excelテンプレートが見つからなかったため、文章のみ出力しました。")
-            ]
+            summary_text = f"【{parsed_data.get('name', '生徒')}さんの成長レポートを作成しました】\n\n" \
+                           f"■今月の成長ポイント\n{parsed_data.get('growth_point', '')}\n\n" \
+                           f"■来月の目標\n{parsed_data.get('next_goal', '')}\n\n" \
+                           f"※Excelテンプレートが見つからなかったため、文章のみ出力しました。"
+
+        reply_messages = [TextMessage(text=summary_text)]
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
