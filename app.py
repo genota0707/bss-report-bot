@@ -86,8 +86,11 @@ def fetch_memo_from_drive():
 
 def find_student_data(wb, name_query, month_query):
     target_sheet = None
+    month_num = re.sub(r'\D', '', month_query) or "8"
+
+    # シート名の判定（「2026.8月メモ」や「8月」に対応）
     for sheet_name in wb.sheetnames:
-        if month_query in sheet_name:
+        if f"{month_num}月" in sheet_name or month_query in sheet_name:
             target_sheet = wb[sheet_name]
             break
             
@@ -99,7 +102,7 @@ def find_student_data(wb, name_query, month_query):
         "name": name_query,
         "grade": "",
         "course": "",
-        "month": month_query if "月" in month_query else f"{month_query}月",
+        "month": f"{month_num}月",
         "score_stop": "",
         "score_kick": "",
         "score_carry": "",
@@ -109,30 +112,36 @@ def find_student_data(wb, name_query, month_query):
 
     clean_name_query = name_query.replace(" ", "").replace(" ", "")
 
-    for r in range(1, 100):
-        col_b_grade = str(sheet.cell(row=r, column=2).value or "").strip()
-        col_c_course = str(sheet.cell(row=r, column=3).value or "").strip()
-        col_d_last = str(sheet.cell(row=r, column=4).value or "").strip()
-        col_e_first = str(sheet.cell(row=r, column=5).value or "").strip()
+    # スプレッドシートの各行を探索
+    for r in range(1, 150):
+        # 行のすべてのセル文字列を結合して検索
+        row_cells = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
+        row_str = "".join([str(v) for v in row_cells if v is not None])
+        clean_row_str = row_str.replace(" ", "").replace(" ", "")
 
-        full_name_in_row = (col_d_last + col_e_first).replace(" ", "").replace(" ", "")
+        if clean_name_query and clean_name_query in clean_row_str:
+            # 学年（B列）とコース（C列）と名前（D列）を抽出
+            val_b = str(sheet.cell(row=r, column=2).value or "").strip() # 学年
+            val_c = str(sheet.cell(row=r, column=3).value or "").strip() # コース
+            val_d = str(sheet.cell(row=r, column=4).value or "").strip() # 名前
 
-        if clean_name_query and (clean_name_query in full_name_in_row or full_name_in_row in clean_name_query):
-            extracted_info["name"] = f"{col_d_last} {col_e_first}".strip() or name_query
-            extracted_info["grade"] = col_b_grade
-            extracted_info["course"] = col_c_course
+            if "年" in val_b: extracted_info["grade"] = val_b
+            if "週" in val_c: extracted_info["course"] = val_c
+            if val_d: extracted_info["name"] = val_d
 
+            # 点数欄（E列:止める, F列:蹴る, G列:運ぶ, H列:判断）
             def get_val(col_idx):
                 v = sheet.cell(row=r, column=col_idx).value
                 return str(v).strip() if v is not None else ""
 
-            extracted_info["score_stop"] = get_val(6)
-            extracted_info["score_kick"] = get_val(7)
-            extracted_info["score_carry"] = get_val(8)
-            extracted_info["score_judge"] = get_val(9)
+            extracted_info["score_stop"] = get_val(5)
+            extracted_info["score_kick"] = get_val(6)
+            extracted_info["score_carry"] = get_val(7)
+            extracted_info["score_judge"] = get_val(8)
 
+            # 気づきメモ（I列以降）
             memos = []
-            for c in range(10, 16):
+            for c in range(9, 16):
                 v = sheet.cell(row=r, column=c).value
                 if v and str(v).strip():
                     memos.append(str(v).strip())
