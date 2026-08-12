@@ -61,13 +61,12 @@ def callback():
     return 'OK'
 
 def fetch_memo_from_drive():
-    """Googleドライブからメモを取得（公開Web取得＋サービスアカウントの2段階対応）"""
     if not GOOGLE_DRIVE_FILE_ID:
         return None, "環境変数 GOOGLE_DRIVE_FILE_ID が未設定です。"
 
     file_id = GOOGLE_DRIVE_FILE_ID.strip()
 
-    # 1. Googleスプレッドシート公開エクスポート試行（「リンクを知っている全員」権限で動作）
+    # 1. Googleスプレッドシート公開エクスポート試行
     pub_sheet_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
     try:
         res = requests.get(pub_sheet_url, timeout=10)
@@ -87,7 +86,7 @@ def fetch_memo_from_drive():
     except Exception:
         pass
 
-    # 3. サービスアカウント認証試行（バックアップ）
+    # 3. サービスアカウント認証試行
     if GOOGLE_SERVICE_ACCOUNT_JSON:
         try:
             info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
