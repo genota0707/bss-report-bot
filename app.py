@@ -6,8 +6,6 @@ import requests
 import openpyxl
 from io import BytesIO
 from flask import Flask, request, abort, send_file
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -24,8 +22,7 @@ app = Flask(__name__)
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GOOGLE_DRIVE_FILE_ID = os.getenv('GOOGLE_DRIVE_FILE_ID')
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+GOOGLE_DRIVE_FILE_ID = os.getenv('GOOGLE_DRIVE_FILE_ID', '1MRgGkz7bQDR90kMtLfNmeWAOFDfAU8Kj')
 SERVER_BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://bss-report-bot.onrender.com')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
@@ -61,53 +58,33 @@ def callback():
     return 'OK'
 
 def fetch_memo_from_drive():
-    if not GOOGLE_DRIVE_FILE_ID:
-        return None, "環境変数 GOOGLE_DRIVE_FILE_ID が未設定です。"
+    """公開リンクからダイレクトダウンロード（API認証不要）"""
+    file_id = GOOGLE_DRIVE_FILE_ID.strip() if GOOGLE_DRIVE_FILE_ID else '1MRgGkz7bQDR90kMtLfNmeWAOFDfAU8Kj'
 
-    file_id = GOOGLE_DRIVE_FILE_ID.strip()
+    # URLパターン1: Googleスプレッドシート公開エクスポート
+    urls = [
+        f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx",
+        f"https://drive.google.com/uc?export=download&id={file_id}",
+        f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx&id={file_id}"
+    ]
 
-    # 1. サービスアカウント認証
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    last_err = ""
+    for url in urls:
         try:
-            info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-            if "private_key" in info and isinstance(info["private_key"], str):
-                info["private_key"] = info["private_key"].replace("\\n", "\n")
-
-            creds = Credentials.from_service_account_info(
-                info, scopes=['https://www.googleapis.com/auth/drive.readonly']
-            )
-            service = build('drive', 'v3', credentials=creds)
-
-            try:
-                request_file = service.files().export_media(
-                    fileId=file_id,
-                    mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                )
-                file_stream = BytesIO(request_file.execute())
-                wb = openpyxl.load_workbook(file_stream, data_only=True)
+            res = requests.get(url, headers=headers, timeout=12)
+            if res.status_code == 200 and len(res.content) > 1000:
+                wb = openpyxl.load_workbook(BytesIO(res.content), data_only=True)
                 return wb, None
-            except Exception as e_export:
-                try:
-                    request_file = service.files().get_media(fileId=file_id)
-                    file_stream = BytesIO(request_file.execute())
-                    wb = openpyxl.load_workbook(file_stream, data_only=True)
-                    return wb, None
-                except Exception as e_get:
-                    return None, f"Drive取得エラー: export({str(e_export)}) / get({str(e_get)})"
+            else:
+                last_err = f"Status {res.status_code}, Size {len(res.content)}"
         except Exception as e:
-            return None, f"認証キー解析エラー: {str(e)}"
+            last_err = str(e)
 
-    # 2. 公開リンク取得
-    pub_sheet_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
-    try:
-        res = requests.get(pub_sheet_url, timeout=10)
-        if res.status_code == 200 and len(res.content) > 500:
-            wb = openpyxl.load_workbook(BytesIO(res.content), data_only=True)
-            return wb, None
-    except Exception:
-        pass
-
-    return None, "Googleドライブのファイル取得に失敗しました。"
+    return None, f"直接Web取得エラー ({last_err})"
 
 def find_student_data(wb, name_query, month_query):
     target_sheet = None
@@ -210,7 +187,6 @@ def generate_ai_report(student_data, api_key):
             res_data = res.json()
             if res.status_code == 200 and 'candidates' in res_data:
                 raw_text = res_data['candidates'][0]['content']['parts'][0]['text'].strip()
-                # 記号エスケープを安全に処理
                 bq = "`" * 3
                 raw_text = raw_text.replace(bq + "json", "").replace(bq, "").strip()
                 return json.loads(raw_text)
