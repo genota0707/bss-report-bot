@@ -111,32 +111,48 @@ def find_student_data(wb, name_query, month_query):
 
     clean_name_query = name_query.replace(" ", "").replace(" ", "")
 
-    for r in range(1, 150):
-        # D列（苗字＋名前）の取得
-        val_d = str(sheet.cell(row=r, column=4).value or "").strip()
-        clean_val_d = val_d.replace(" ", "").replace(" ", "")
+    # 1. ヘッダー行を探して評価項目の列番号を自動特定
+    col_stop, col_kick, col_carry, col_judge = 5, 6, 7, 8  # デフォルト（E, F, G, H列）
+    for r in range(1, 10):
+        for c in range(1, 15):
+            val = str(sheet.cell(row=r, column=c).value or "").strip()
+            if "止める" in val: col_stop = c
+            elif "蹴る" in val: col_kick = c
+            elif "運ぶ" in val: col_carry = c
+            elif "判断" in val: col_judge = c
 
-        if clean_name_query and clean_name_query in clean_val_d:
-            val_b = str(sheet.cell(row=r, column=2).value or "").strip() # B列: 学年
-            val_c = str(sheet.cell(row=r, column=3).value or "").strip() # C列: コース
+    # 2. 生徒データの行を探索
+    for r in range(1, 200):
+        # 行の全文字列を取得してマッチング
+        row_cells = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
+        row_str = "".join([str(v) for v in row_cells if v is not None])
+        clean_row_str = row_str.replace(" ", "").replace(" ", "")
 
-            extracted_info["name"] = val_d
-            if "年" in val_b: extracted_info["grade"] = val_b
-            if "週" in val_c: extracted_info["course"] = val_c
+        if clean_name_query and clean_name_query in clean_row_str:
+            # 学年・コース・名前の取得
+            for c in range(1, 6):
+                val = str(sheet.cell(row=r, column=c).value or "").strip()
+                if "年" in val and not extracted_info["grade"]:
+                    extracted_info["grade"] = val
+                elif "週" in val and not extracted_info["course"]:
+                    extracted_info["course"] = val
+                elif clean_name_query in val.replace(" ", "").replace(" ", ""):
+                    extracted_info["name"] = val
 
-            def get_val(col_idx):
+            def get_cell_str(col_idx):
                 v = sheet.cell(row=r, column=col_idx).value
                 return str(v).strip() if v is not None else ""
 
-            # 正しい列位置（E列=止める, F列=蹴る, G列=運ぶ, H列=判断）
-            extracted_info["score_stop"] = get_val(5)
-            extracted_info["score_kick"] = get_val(6)
-            extracted_info["score_carry"] = get_val(7)
-            extracted_info["score_judge"] = get_val(8)
+            # 点数の抽出
+            extracted_info["score_stop"] = get_cell_str(col_stop)
+            extracted_info["score_kick"] = get_cell_str(col_kick)
+            extracted_info["score_carry"] = get_cell_str(col_carry)
+            extracted_info["score_judge"] = get_cell_str(col_judge)
 
-            # I列以降: 気づきメモ
+            # メモの抽出（評価列より右側のテキスト）
             memos = []
-            for c in range(9, 16):
+            max_score_col = max(col_stop, col_kick, col_carry, col_judge)
+            for c in range(max_score_col + 1, max_score_col + 8):
                 v = sheet.cell(row=r, column=c).value
                 if v and str(v).strip():
                     memos.append(str(v).strip())
