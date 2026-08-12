@@ -61,36 +61,42 @@ def callback():
     return 'OK'
 
 def fetch_memo_from_drive():
-    """GoogleドライブからメモExcel/スプレッドシートを取得してopenpyxlで読み込む"""
+    """Googleドライブからメモを取得してopenpyxlで読み込む（改行補正付き）"""
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not GOOGLE_DRIVE_FILE_ID:
-        print("Google Drive configuration missing.")
-        return None
+        return None, "環境変数が不足しています。"
+
+    file_id = GOOGLE_DRIVE_FILE_ID.strip()
 
     try:
         info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/drive.readonly'])
+        # private_key の改行文字エスケープ補正
+        if "private_key" in info and isinstance(info["private_key"], str):
+            info["private_key"] = info["private_key"].replace("\\n", "\n")
+
+        creds = Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
         service = build('drive', 'v3', credentials=creds)
         
-        # バイナリ取得を優先試行し、不可の場合はスプレッドシート形式でエクスポート
+        # バイナリ直接取得試行
         try:
-            request_file = service.files().get_media(fileId=GOOGLE_DRIVE_FILE_ID)
+            request_file = service.files().get_media(fileId=file_id)
             file_stream = BytesIO(request_file.execute())
             wb = openpyxl.load_workbook(file_stream, data_only=True)
-            return wb
+            return wb, None
         except Exception:
+            # スプレッドシートエクスポート試行
             request_file = service.files().export_media(
-                fileId=GOOGLE_DRIVE_FILE_ID,
+                fileId=file_id,
                 mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
             file_stream = BytesIO(request_file.execute())
             wb = openpyxl.load_workbook(file_stream, data_only=True)
-            return wb
+            return wb, None
     except Exception as e:
-        print("Failed to download file from Google Drive:", e)
-        return None
+        return None, f"認証・ダウンロードエラー: {str(e)}"
 
 def find_student_data(wb, name_query, month_query):
-    """Excelシートから該当生徒のデータを検索して抽出"""
     target_sheet = None
     for sheet_name in wb.sheetnames:
         if month_query in sheet_name or f"{month_query}月" in sheet_name:
@@ -98,7 +104,7 @@ def find_student_data(wb, name_query, month_query):
             break
             
     if target_sheet is None:
-        target_sheet = wb[wb.sheetnames[-1]]  # 見つからない場合は一番最後のシート
+        target_sheet = wb[wb.sheetnames[-1]]
     sheet = target_sheet
 
     extracted_info = {
@@ -115,14 +121,12 @@ def find_student_data(wb, name_query, month_query):
 
     clean_name_query = name_query.replace(" ", "").replace(" ", "")
 
-    # 行スキャン
     for r in range(1, 40):
         row_vals = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
         row_str = "".join([str(v) for v in row_vals if v is not None])
         clean_row_str = row_str.replace(" ", "").replace(" ", "")
         
         if clean_name_query in clean_row_str:
-            # 学年・コース情報の補正
             for val in row_vals:
                 if val is not None:
                     s_val = str(val).strip()
@@ -131,7 +135,6 @@ def find_student_data(wb, name_query, month_query):
                     elif "週" in s_val and not extracted_info["course"]:
                         extracted_info["course"] = s_val
             
-            # 数値評価・メモの抽出
             scores = []
             memos = []
             for cell_val in row_vals[3:]:
@@ -232,10 +235,10 @@ def async_process_and_reply(reply_token, user_text):
     name_query = parts[0] if len(parts) > 0 else ""
     month_query = parts[1] if len(parts) > 1 else "8月"
 
-    wb_memo = fetch_memo_from_drive()
+    wb_memo, error_msg = fetch_memo_from_drive()
     
     if not wb_memo:
-        reply_text = "Googleドライブのメモ取得に失敗しました。設定を確認してください。"
+        reply_text = f"Googleドライブのメモ取得に失敗しました。\n【詳細】\n{error_msg}"
     else:
         student_data = find_student_data(wb_memo, name_query, month_query)
         ai_res = generate_ai_report(student_data, GEMINI_API_KEY)
