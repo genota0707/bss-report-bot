@@ -1,5 +1,4 @@
 Flask==3.0.3
 line-bot-sdk==3.11.0
-google-genai
-openpyxl==3.1.5
+google-generativeai==0.8.4
 gunicorn==22.0.0
