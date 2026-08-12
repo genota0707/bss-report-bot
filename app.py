@@ -2,7 +2,7 @@ import os
 import json
 import requests
 import openpyxl
-from flask import Flask, request, abort, send_from_file
+from flask import Flask, request, abort, send_file
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -33,7 +33,10 @@ def index():
 
 @app.route("/files/<filename>", methods=['GET'])
 def download_file(filename):
-    return send_from_file("/tmp", filename, as_attachment=True)
+    file_path = os.path.join("/tmp", filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    return "File not found", 404
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -103,7 +106,7 @@ def parse_and_generate(user_text, api_key):
 
 def create_excel_report(data):
     if not os.path.exists(TEMPLATE_PATH):
-        return None
+        return None, None
 
     wb = openpyxl.load_workbook(TEMPLATE_PATH)
     sheet = wb.active
@@ -138,18 +141,21 @@ def handle_message(event):
     else:
         file_name, file_path = create_excel_report(parsed_data)
         
-        # テキスト要約の作成
         summary_text = f"【{parsed_data.get('name', '生徒')}さんの成長レポートを作成しました】\n\n" \
                        f"■今月の成長ポイント\n{parsed_data.get('growth_point', '')}\n\n" \
                        f"■来月の目標\n{parsed_data.get('next_goal', '')}\n\n" \
                        f"📎 Excelファイルを添付しました。"
 
-        file_url = f"{SERVER_BASE_URL}/files/{file_name}"
-        
-        reply_messages = [
-            TextMessage(text=summary_text),
-            FileMessage(original_content_url=file_url, file_name=file_name)
-        ]
+        if file_name and file_path:
+            file_url = f"{SERVER_BASE_URL}/files/{file_name}"
+            reply_messages = [
+                TextMessage(text=summary_text),
+                FileMessage(original_content_url=file_url, file_name=file_name)
+            ]
+        else:
+            reply_messages = [
+                TextMessage(text=summary_text + "\n※Excelテンプレートが見つからなかったため、文章のみ出力しました。")
+            ]
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
