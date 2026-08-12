@@ -1,8 +1,10 @@
 import os
 import json
+import uuid
 import threading
 import requests
 import openpyxl
+from urllib.parse import quote
 from flask import Flask, request, abort, send_file
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -11,7 +13,6 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    PushMessageRequest,
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
@@ -36,7 +37,11 @@ def index():
 def download_file(filename):
     file_path = os.path.join("/tmp", filename)
     if os.path.exists(file_path):
-        return send_file(file_path, as_attachment=True)
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name="成長レポート.xlsx"
+        )
     return "File not found", 404
 
 @app.route("/callback", methods=['POST'])
@@ -128,7 +133,9 @@ def create_excel_report(data):
     if data.get("growth_point"): sheet["B16"] = data["growth_point"]
     if data.get("next_goal"): sheet["B25"] = data["next_goal"]
 
-    file_name = f"成長レポート_{data.get('name', '生徒')}_{data.get('month', '')}.xlsx"
+    # 安全な英数字ファイル名に変更
+    unique_id = str(uuid.uuid4())[:8]
+    file_name = f"report_{unique_id}.xlsx"
     file_path = os.path.join("/tmp", file_name)
     wb.save(file_path)
     return file_name, file_path
@@ -173,7 +180,6 @@ def handle_message(event):
     user_text = event.message.text
     reply_token = event.reply_token
 
-    # バックグラウンドスレッドで重い処理（AI・Excel作成）を実行
     thread = threading.Thread(target=async_process_and_reply, args=(reply_token, user_text))
     thread.start()
 
