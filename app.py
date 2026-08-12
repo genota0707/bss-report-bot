@@ -61,9 +61,8 @@ def callback():
     return 'OK'
 
 def fetch_memo_from_drive():
-    """ファイル形式（スプレッドシートか通常のExcelか）を自動判別して取得"""
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not GOOGLE_DRIVE_FILE_ID:
-        return None, "環境変数が未設定です。"
+        return None, "環境変数（GOOGLE_SERVICE_ACCOUNT_JSON または GOOGLE_DRIVE_FILE_ID）が未設定です。"
 
     file_id = GOOGLE_DRIVE_FILE_ID.strip()
 
@@ -77,25 +76,29 @@ def fetch_memo_from_drive():
         )
         service = build('drive', 'v3', credentials=creds)
 
-        # 1. メタデータから mimeType を取得
-        file_meta = service.files().get(fileId=file_id, fields='mimeType, name').execute()
-        mime_type = file_meta.get('mimeType', '')
-
-        # 2. mimeType に応じた適切な取得処理
-        if mime_type == 'application/vnd.google-apps.spreadsheet':
+        # 1. Googleスプレッドシートとしてエクスポート試行
+        try:
             request_file = service.files().export_media(
                 fileId=file_id,
                 mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
-        else:
-            request_file = service.files().get_media(fileId=file_id)
+            file_stream = BytesIO(request_file.execute())
+            wb = openpyxl.load_workbook(file_stream, data_only=True)
+            return wb, None
+        except Exception:
+            pass
 
-        file_stream = BytesIO(request_file.execute())
-        wb = openpyxl.load_workbook(file_stream, data_only=True)
-        return wb, None
+        # 2. 通常ファイル（Excel）として取得試行
+        try:
+            request_file = service.files().get_media(fileId=file_id)
+            file_stream = BytesIO(request_file.execute())
+            wb = openpyxl.load_workbook(file_stream, data_only=True)
+            return wb, None
+        except Exception as e2:
+            return None, f"Driveアクセスエラー: {str(e2)}"
 
     except Exception as e:
-        return None, f"Driveアクセスエラー: {str(e)}"
+        return None, f"Google認証エラー: {str(e)}"
 
 def find_student_data(wb, name_query, month_query):
     target_sheet = None
@@ -122,7 +125,7 @@ def find_student_data(wb, name_query, month_query):
 
     clean_name_query = name_query.replace(" ", "").replace(" ", "")
 
-    for r in range(1, 40):
+    for r in range(1, 50):
         row_vals = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
         row_str = "".join([str(v) for v in row_vals if v is not None])
         clean_row_str = row_str.replace(" ", "").replace(" ", "")
@@ -194,7 +197,7 @@ def generate_ai_report(student_data, api_key):
 
     for url in candidate_urls:
         try:
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
             res_data = res.json()
             if res.status_code == 200 and 'candidates' in res_data:
                 raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
@@ -232,30 +235,34 @@ def create_excel_report(data):
     return file_name, file_path
 
 def async_process_and_reply(reply_token, user_text):
-    parts = user_text.strip().split()
-    name_query = parts[0] if len(parts) > 0 else ""
-    month_query = parts[1] if len(parts) > 1 else "8月"
+    try:
+        parts = user_text.strip().split()
+        name_query = parts[0] if len(parts) > 0 else ""
+        month_query = parts[1] if len(parts) > 1 else "8月"
 
-    wb_memo, error_msg = fetch_memo_from_drive()
-    
-    if not wb_memo:
-        reply_text = f"Googleドライブのメモ取得に失敗しました。\n【詳細】\n{error_msg}"
-    else:
-        student_data = find_student_data(wb_memo, name_query, month_query)
-        ai_res = generate_ai_report(student_data, GEMINI_API_KEY)
-        student_data["growth_point"] = ai_res.get("growth_point", "")
-        student_data["next_goal"] = ai_res.get("next_goal", "")
-
-        file_name, file_path = create_excel_report(student_data)
+        wb_memo, error_msg = fetch_memo_from_drive()
         
-        if file_name and file_path:
-            file_url = f"{SERVER_BASE_URL}/files/{file_name}"
-            reply_text = f"【{student_data.get('name', name_query)}さんの成長レポートを作成しました】\n\n" \
-                         f"■今月の成長ポイント\n{student_data.get('growth_point', '')}\n\n" \
-                         f"■来月の目標\n{student_data.get('next_goal', '')}\n\n" \
-                         f"📥 完成したExcelファイルのダウンロード:\n{file_url}"
+        if not wb_memo:
+            reply_text = f"Googleドライブのメモ取得に失敗しました。\n【詳細】\n{error_msg}"
         else:
-            reply_text = "レポートExcelの作成に失敗しました。"
+            student_data = find_student_data(wb_memo, name_query, month_query)
+            ai_res = generate_ai_report(student_data, GEMINI_API_KEY)
+            student_data["growth_point"] = ai_res.get("growth_point", "")
+            student_data["next_goal"] = ai_res.get("next_goal", "")
+
+            file_name, file_path = create_excel_report(student_data)
+            
+            if file_name and file_path:
+                file_url = f"{SERVER_BASE_URL}/files/{file_name}"
+                reply_text = f"【{student_data.get('name', name_query)}さんの成長レポートを作成しました】\n\n" \
+                             f"■今月の成長ポイント\n{student_data.get('growth_point', '')}\n\n" \
+                             f"■来月の目標\n{student_data.get('next_goal', '')}\n\n" \
+                             f"📥 完成したExcelファイルのダウンロード:\n{file_url}"
+            else:
+                reply_text = "レポートExcelテンプレートの読み込みに失敗しました。"
+
+    except Exception as e:
+        reply_text = f"システム処理エラーが発生しました:\n{str(e)}"
 
     try:
         with ApiClient(configuration) as api_client:
