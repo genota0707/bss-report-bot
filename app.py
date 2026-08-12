@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 import requests
 import openpyxl
 from flask import Flask, request, abort, send_file
@@ -10,6 +11,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
@@ -84,8 +86,8 @@ def parse_and_generate(user_text, api_key):
                 if "generateContent" in m.get("supportedGenerationMethods", []):
                     m_name = m.get("name")
                     candidate_urls.append(f"https://generativelanguage.googleapis.com/v1beta/{m_name}:generateContent?key={api_key}")
-    except Exception:
-        pass
+    except Exception as e:
+        print("Model list error:", e)
 
     if not candidate_urls:
         candidate_urls = [f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"]
@@ -98,13 +100,15 @@ def parse_and_generate(user_text, api_key):
                 raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
                 raw_text = raw_text.replace("```json", "").replace("```", "").strip()
                 return json.loads(raw_text)
-        except Exception:
+        except Exception as e:
+            print("API Post error:", e)
             continue
 
     return None
 
 def create_excel_report(data):
     if not os.path.exists(TEMPLATE_PATH):
+        print("Template file not found:", TEMPLATE_PATH)
         return None, None
 
     wb = openpyxl.load_workbook(TEMPLATE_PATH)
@@ -129,10 +133,7 @@ def create_excel_report(data):
     wb.save(file_path)
     return file_name, file_path
 
-@handler.add(MessageEvent, message=TextMessageContent)
-def handle_message(event):
-    user_text = event.message.text
-    
+def async_process_and_reply(reply_token, user_text):
     parsed_data = parse_and_generate(user_text, GEMINI_API_KEY)
 
     if not parsed_data:
@@ -154,14 +155,27 @@ def handle_message(event):
 
         reply_messages = [TextMessage(text=summary_text)]
 
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=reply_messages
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=reply_messages
+                )
             )
-        )
+        print("Successfully replied to LINE!")
+    except Exception as e:
+        print("Failed to reply to LINE:", e)
+
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_message(event):
+    user_text = event.message.text
+    reply_token = event.reply_token
+
+    # バックグラウンドスレッドで重い処理（AI・Excel作成）を実行
+    thread = threading.Thread(target=async_process_and_reply, args=(reply_token, user_text))
+    thread.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
