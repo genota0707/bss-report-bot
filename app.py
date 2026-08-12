@@ -88,7 +88,6 @@ def find_student_data(wb, name_query, month_query):
     target_sheet = None
     month_num = re.sub(r'\D', '', month_query) or "8"
 
-    # シート名の判定（「2026.8月メモ」や「8月」に対応）
     for sheet_name in wb.sheetnames:
         if f"{month_num}月" in sheet_name or month_query in sheet_name:
             target_sheet = wb[sheet_name]
@@ -112,34 +111,30 @@ def find_student_data(wb, name_query, month_query):
 
     clean_name_query = name_query.replace(" ", "").replace(" ", "")
 
-    # スプレッドシートの各行を探索
     for r in range(1, 150):
-        # 行のすべてのセル文字列を結合して検索
-        row_cells = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
-        row_str = "".join([str(v) for v in row_cells if v is not None])
-        clean_row_str = row_str.replace(" ", "").replace(" ", "")
+        # D列（苗字＋名前）の取得
+        val_d = str(sheet.cell(row=r, column=4).value or "").strip()
+        clean_val_d = val_d.replace(" ", "").replace(" ", "")
 
-        if clean_name_query and clean_name_query in clean_row_str:
-            # 学年（B列）とコース（C列）と名前（D列）を抽出
-            val_b = str(sheet.cell(row=r, column=2).value or "").strip() # 学年
-            val_c = str(sheet.cell(row=r, column=3).value or "").strip() # コース
-            val_d = str(sheet.cell(row=r, column=4).value or "").strip() # 名前
+        if clean_name_query and clean_name_query in clean_val_d:
+            val_b = str(sheet.cell(row=r, column=2).value or "").strip() # B列: 学年
+            val_c = str(sheet.cell(row=r, column=3).value or "").strip() # C列: コース
 
+            extracted_info["name"] = val_d
             if "年" in val_b: extracted_info["grade"] = val_b
             if "週" in val_c: extracted_info["course"] = val_c
-            if val_d: extracted_info["name"] = val_d
 
-            # 点数欄（E列:止める, F列:蹴る, G列:運ぶ, H列:判断）
             def get_val(col_idx):
                 v = sheet.cell(row=r, column=col_idx).value
                 return str(v).strip() if v is not None else ""
 
+            # 正しい列位置（E列=止める, F列=蹴る, G列=運ぶ, H列=判断）
             extracted_info["score_stop"] = get_val(5)
             extracted_info["score_kick"] = get_val(6)
             extracted_info["score_carry"] = get_val(7)
             extracted_info["score_judge"] = get_val(8)
 
-            # 気づきメモ（I列以降）
+            # I列以降: 気づきメモ
             memos = []
             for c in range(9, 16):
                 v = sheet.cell(row=r, column=c).value
