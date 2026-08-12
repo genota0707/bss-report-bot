@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import uuid
 import threading
@@ -22,7 +23,7 @@ app = Flask(__name__)
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-GOOGLE_DRIVE_FILE_ID = os.getenv('GOOGLE_DRIVE_FILE_ID', '1MRgGkz7bQDR90kMtLfNmeWAOFDfAU8Kj')
+GOOGLE_DRIVE_FILE_ID = os.getenv('GOOGLE_DRIVE_FILE_ID', '1N9nA3jMjd84qPCQbSPgo_eCXP5C53z4AAMGFUkNPb4A')
 SERVER_BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://bss-report-bot.onrender.com')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
@@ -58,18 +59,15 @@ def callback():
     return 'OK'
 
 def fetch_memo_from_drive():
-    """公開リンクからダイレクトダウンロード（API認証不要）"""
-    file_id = GOOGLE_DRIVE_FILE_ID.strip() if GOOGLE_DRIVE_FILE_ID else '1MRgGkz7bQDR90kMtLfNmeWAOFDfAU8Kj'
+    file_id = GOOGLE_DRIVE_FILE_ID.strip() if GOOGLE_DRIVE_FILE_ID else '1N9nA3jMjd84qPCQbSPgo_eCXP5C53z4AAMGFUkNPb4A'
 
-    # URLパターン1: Googleスプレッドシート公開エクスポート
     urls = [
         f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx",
-        f"https://drive.google.com/uc?export=download&id={file_id}",
-        f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx&id={file_id}"
+        f"https://drive.google.com/uc?export=download&id={file_id}"
     ]
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
     last_err = ""
@@ -89,7 +87,7 @@ def fetch_memo_from_drive():
 def find_student_data(wb, name_query, month_query):
     target_sheet = None
     for sheet_name in wb.sheetnames:
-        if month_query in sheet_name or f"{month_query}月" in sheet_name:
+        if month_query in sheet_name:
             target_sheet = wb[sheet_name]
             break
             
@@ -111,37 +109,36 @@ def find_student_data(wb, name_query, month_query):
 
     clean_name_query = name_query.replace(" ", "").replace(" ", "")
 
-    for r in range(1, 50):
-        row_vals = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
-        row_str = "".join([str(v) for v in row_vals if v is not None])
-        clean_row_str = row_str.replace(" ", "").replace(" ", "")
-        
-        if clean_name_query in clean_row_str:
-            for val in row_vals:
-                if val is not None:
-                    s_val = str(val).strip()
-                    if "年" in s_val and not extracted_info["grade"]:
-                        extracted_info["grade"] = s_val
-                    elif "週" in s_val and not extracted_info["course"]:
-                        extracted_info["course"] = s_val
-            
-            scores = []
+    for r in range(1, 100):
+        col_b_grade = str(sheet.cell(row=r, column=2).value or "").strip()
+        col_c_course = str(sheet.cell(row=r, column=3).value or "").strip()
+        col_d_last = str(sheet.cell(row=r, column=4).value or "").strip()
+        col_e_first = str(sheet.cell(row=r, column=5).value or "").strip()
+
+        full_name_in_row = (col_d_last + col_e_first).replace(" ", "").replace(" ", "")
+
+        if clean_name_query and (clean_name_query in full_name_in_row or full_name_in_row in clean_name_query):
+            extracted_info["name"] = f"{col_d_last} {col_e_first}".strip() or name_query
+            extracted_info["grade"] = col_b_grade
+            extracted_info["course"] = col_c_course
+
+            def get_val(col_idx):
+                v = sheet.cell(row=r, column=col_idx).value
+                return str(v).strip() if v is not None else ""
+
+            extracted_info["score_stop"] = get_val(6)
+            extracted_info["score_kick"] = get_val(7)
+            extracted_info["score_carry"] = get_val(8)
+            extracted_info["score_judge"] = get_val(9)
+
             memos = []
-            for cell_val in row_vals[3:]:
-                if isinstance(cell_val, (int, float)):
-                    scores.append(int(cell_val))
-                elif isinstance(cell_val, str) and cell_val.strip():
-                    if not any(k in cell_val for k in ["年生", "週1回", "週2回"]):
-                        memos.append(cell_val.strip())
-            
-            if len(scores) >= 4:
-                extracted_info["score_stop"] = str(scores[0])
-                extracted_info["score_kick"] = str(scores[1])
-                extracted_info["score_carry"] = str(scores[2])
-                extracted_info["score_judge"] = str(scores[3])
-                
+            for c in range(10, 16):
+                v = sheet.cell(row=r, column=c).value
+                if v and str(v).strip():
+                    memos.append(str(v).strip())
             if memos:
                 extracted_info["memo"] = " ".join(memos)
+
             break
 
     return extracted_info
@@ -223,9 +220,16 @@ def create_excel_report(data):
 
 def async_process_and_reply(reply_token, user_text):
     try:
-        parts = user_text.strip().split()
-        name_query = parts[0] if len(parts) > 0 else ""
-        month_query = parts[1] if len(parts) > 1 else "8月"
+        user_text_clean = user_text.strip()
+        month_match = re.search(r'(\d{1,2})月', user_text_clean)
+        
+        if month_match:
+            month_query = month_match.group(0)
+            name_query = user_text_clean.replace(month_query, "").strip()
+        else:
+            parts = user_text_clean.split()
+            name_query = parts[0] if parts else ""
+            month_query = parts[1] if len(parts) > 1 else "8月"
 
         wb_memo, error_msg = fetch_memo_from_drive()
         
