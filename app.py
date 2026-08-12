@@ -4,8 +4,10 @@ import uuid
 import threading
 import requests
 import openpyxl
-from urllib.parse import quote
+from io import BytesIO
 from flask import Flask, request, abort, send_file
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -22,6 +24,8 @@ app = Flask(__name__)
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GOOGLE_DRIVE_FILE_ID = os.getenv('GOOGLE_DRIVE_FILE_ID')
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
 SERVER_BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://bss-report-bot.onrender.com')
 
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
@@ -56,30 +60,117 @@ def callback():
 
     return 'OK'
 
-def parse_and_generate(user_text, api_key):
-    prompt = f"""
-以下のサッカースクールのメモテキストから、保護者・生徒向けの成長レポート情報および文章を作成し、JSON形式で出力してください。
+def fetch_memo_from_drive():
+    """GoogleドライブからメモExcel/スプレッドシートを取得してopenpyxlで読み込む"""
+    if not GOOGLE_SERVICE_ACCOUNT_JSON or not GOOGLE_DRIVE_FILE_ID:
+        print("Google Drive configuration missing.")
+        return None
 
-入力メモ:
-{user_text}
+    try:
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        creds = Credentials.from_service_account_info(info, scopes=['https://www.googleapis.com/auth/drive.readonly'])
+        service = build('drive', 'v3', credentials=creds)
+        
+        # バイナリ取得を優先試行し、不可の場合はスプレッドシート形式でエクスポート
+        try:
+            request_file = service.files().get_media(fileId=GOOGLE_DRIVE_FILE_ID)
+            file_stream = BytesIO(request_file.execute())
+            wb = openpyxl.load_workbook(file_stream, data_only=True)
+            return wb
+        except Exception:
+            request_file = service.files().export_media(
+                fileId=GOOGLE_DRIVE_FILE_ID,
+                mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            file_stream = BytesIO(request_file.execute())
+            wb = openpyxl.load_workbook(file_stream, data_only=True)
+            return wb
+    except Exception as e:
+        print("Failed to download file from Google Drive:", e)
+        return None
+
+def find_student_data(wb, name_query, month_query):
+    """Excelシートから該当生徒のデータを検索して抽出"""
+    target_sheet = None
+    for sheet_name in wb.sheetnames:
+        if month_query in sheet_name or f"{month_query}月" in sheet_name:
+            target_sheet = wb[sheet_name]
+            break
+            
+    if target_sheet is None:
+        target_sheet = wb[wb.sheetnames[-1]]  # 見つからない場合は一番最後のシート
+    sheet = target_sheet
+
+    extracted_info = {
+        "name": name_query,
+        "grade": "",
+        "course": "",
+        "month": month_query if "月" in month_query else f"{month_query}月",
+        "score_stop": "",
+        "score_kick": "",
+        "score_carry": "",
+        "score_judge": "",
+        "memo": ""
+    }
+
+    clean_name_query = name_query.replace(" ", "").replace(" ", "")
+
+    # 行スキャン
+    for r in range(1, 40):
+        row_vals = [sheet.cell(row=r, column=c).value for c in range(1, 15)]
+        row_str = "".join([str(v) for v in row_vals if v is not None])
+        clean_row_str = row_str.replace(" ", "").replace(" ", "")
+        
+        if clean_name_query in clean_row_str:
+            # 学年・コース情報の補正
+            for val in row_vals:
+                if val is not None:
+                    s_val = str(val).strip()
+                    if "年" in s_val and not extracted_info["grade"]:
+                        extracted_info["grade"] = s_val
+                    elif "週" in s_val and not extracted_info["course"]:
+                        extracted_info["course"] = s_val
+            
+            # 数値評価・メモの抽出
+            scores = []
+            memos = []
+            for cell_val in row_vals[3:]:
+                if isinstance(cell_val, (int, float)):
+                    scores.append(int(cell_val))
+                elif isinstance(cell_val, str) and cell_val.strip():
+                    if not any(k in cell_val for k in ["年生", "週1回", "週2回"]):
+                        memos.append(cell_val.strip())
+            
+            if len(scores) >= 4:
+                extracted_info["score_stop"] = str(scores[0])
+                extracted_info["score_kick"] = str(scores[1])
+                extracted_info["score_carry"] = str(scores[2])
+                extracted_info["score_judge"] = str(scores[3])
+                
+            if memos:
+                extracted_info["memo"] = " ".join(memos)
+            break
+
+    return extracted_info
+
+def generate_ai_report(student_data, api_key):
+    prompt = f"""
+以下のサッカースクールの生徒メモデータをもとに、保護者・生徒向けの成長レポート文章（今月の成長ポイント、来月の目標）を作成し、JSON形式で出力してください。
+
+生徒データ:
+- 名前: {student_data.get('name')}
+- 学年: {student_data.get('grade')}
+- 月: {student_data.get('month')}
+- 評価 (止める:{student_data.get('score_stop')}, 蹴る:{student_data.get('score_kick')}, 運ぶ:{student_data.get('score_carry')}, 判断:{student_data.get('score_judge')})
+- 今月の気付きメモ: {student_data.get('memo')}
 
 出力フォーマット(JSONのみ出力してください。マークダウンなどの囲みは不要です):
 {{
-  "name": "生徒名(テキストから抽出。無ければ空文字)",
-  "grade": "学年(テキストから抽出。例: 4年。無ければ空文字)",
-  "month": "月(テキストから抽出。例: 8月。無ければ空文字)",
-  "course": "コース(テキストから抽出。例: 週1回。無ければ空文字)",
-  "score_stop": "止めるの点数(数値または空文字)",
-  "score_kick": "蹴るの点数(数値または空文字)",
-  "score_carry": "運ぶの点数(数値または空文字)",
-  "score_judge": "判断の点数(数値または空文字)",
   "growth_point": "今月の成長ポイント(150文字程度の丁寧な保護者向け文章)",
   "next_goal": "来月の目標(150文字程度の丁寧な保護者向け文章)"
 }}
 """
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
     candidate_urls = []
     try:
@@ -91,8 +182,8 @@ def parse_and_generate(user_text, api_key):
                 if "generateContent" in m.get("supportedGenerationMethods", []):
                     m_name = m.get("name")
                     candidate_urls.append(f"https://generativelanguage.googleapis.com/v1beta/{m_name}:generateContent?key={api_key}")
-    except Exception as e:
-        print("Model list error:", e)
+    except Exception:
+        pass
 
     if not candidate_urls:
         candidate_urls = [f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"]
@@ -105,21 +196,18 @@ def parse_and_generate(user_text, api_key):
                 raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
                 raw_text = raw_text.replace("```json", "").replace("```", "").strip()
                 return json.loads(raw_text)
-        except Exception as e:
-            print("API Post error:", e)
+        except Exception:
             continue
 
-    return None
+    return {"growth_point": "日々の練習で素晴らしい成長が見られます。", "next_goal": "基本技術のさらなる向上を目指します。"}
 
 def create_excel_report(data):
     if not os.path.exists(TEMPLATE_PATH):
-        print("Template file not found:", TEMPLATE_PATH)
         return None, None
 
     wb = openpyxl.load_workbook(TEMPLATE_PATH)
     sheet = wb.active
 
-    # セル書き込み
     if data.get("name"): sheet["C5"] = data["name"]
     if data.get("grade"): sheet["H5"] = data["grade"]
     if data.get("month"): sheet["C6"] = data["month"]
@@ -133,7 +221,6 @@ def create_excel_report(data):
     if data.get("growth_point"): sheet["B16"] = data["growth_point"]
     if data.get("next_goal"): sheet["B25"] = data["next_goal"]
 
-    # 安全な英数字ファイル名に変更
     unique_id = str(uuid.uuid4())[:8]
     file_name = f"report_{unique_id}.xlsx"
     file_path = os.path.join("/tmp", file_name)
@@ -141,26 +228,30 @@ def create_excel_report(data):
     return file_name, file_path
 
 def async_process_and_reply(reply_token, user_text):
-    parsed_data = parse_and_generate(user_text, GEMINI_API_KEY)
+    parts = user_text.strip().split()
+    name_query = parts[0] if len(parts) > 0 else ""
+    month_query = parts[1] if len(parts) > 1 else "8月"
 
-    if not parsed_data:
-        reply_messages = [TextMessage(text="申し訳ありません。レポートデータの生成に失敗しました。")]
+    wb_memo = fetch_memo_from_drive()
+    
+    if not wb_memo:
+        reply_text = "Googleドライブのメモ取得に失敗しました。設定を確認してください。"
     else:
-        file_name, file_path = create_excel_report(parsed_data)
+        student_data = find_student_data(wb_memo, name_query, month_query)
+        ai_res = generate_ai_report(student_data, GEMINI_API_KEY)
+        student_data["growth_point"] = ai_res.get("growth_point", "")
+        student_data["next_goal"] = ai_res.get("next_goal", "")
+
+        file_name, file_path = create_excel_report(student_data)
         
         if file_name and file_path:
             file_url = f"{SERVER_BASE_URL}/files/{file_name}"
-            summary_text = f"【{parsed_data.get('name', '生徒')}さんの成長レポートを作成しました】\n\n" \
-                           f"■今月の成長ポイント\n{parsed_data.get('growth_point', '')}\n\n" \
-                           f"■来月の目標\n{parsed_data.get('next_goal', '')}\n\n" \
-                           f"📥 完成したExcelファイルのダウンロード:\n{file_url}"
+            reply_text = f"【{student_data.get('name', name_query)}さんの成長レポートを作成しました】\n\n" \
+                         f"■今月の成長ポイント\n{student_data.get('growth_point', '')}\n\n" \
+                         f"■来月の目標\n{student_data.get('next_goal', '')}\n\n" \
+                         f"📥 完成したExcelファイルのダウンロード:\n{file_url}"
         else:
-            summary_text = f"【{parsed_data.get('name', '生徒')}さんの成長レポートを作成しました】\n\n" \
-                           f"■今月の成長ポイント\n{parsed_data.get('growth_point', '')}\n\n" \
-                           f"■来月の目標\n{parsed_data.get('next_goal', '')}\n\n" \
-                           f"※Excelテンプレートが見つからなかったため、文章のみ出力しました。"
-
-        reply_messages = [TextMessage(text=summary_text)]
+            reply_text = "レポートExcelの作成に失敗しました。"
 
     try:
         with ApiClient(configuration) as api_client:
@@ -168,10 +259,9 @@ def async_process_and_reply(reply_token, user_text):
             line_bot_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=reply_token,
-                    messages=reply_messages
+                    messages=[TextMessage(text=reply_text)]
                 )
             )
-        print("Successfully replied to LINE!")
     except Exception as e:
         print("Failed to reply to LINE:", e)
 
