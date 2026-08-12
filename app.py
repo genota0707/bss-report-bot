@@ -61,15 +61,14 @@ def callback():
     return 'OK'
 
 def fetch_memo_from_drive():
-    """Googleドライブからメモを取得してopenpyxlで読み込む（改行補正付き）"""
+    """ファイル形式（スプレッドシートか通常のExcelか）を自動判別して取得"""
     if not GOOGLE_SERVICE_ACCOUNT_JSON or not GOOGLE_DRIVE_FILE_ID:
-        return None, "環境変数が不足しています。"
+        return None, "環境変数が未設定です。"
 
     file_id = GOOGLE_DRIVE_FILE_ID.strip()
 
     try:
         info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        # private_key の改行文字エスケープ補正
         if "private_key" in info and isinstance(info["private_key"], str):
             info["private_key"] = info["private_key"].replace("\\n", "\n")
 
@@ -77,24 +76,26 @@ def fetch_memo_from_drive():
             info, scopes=['https://www.googleapis.com/auth/drive.readonly']
         )
         service = build('drive', 'v3', credentials=creds)
-        
-        # バイナリ直接取得試行
-        try:
-            request_file = service.files().get_media(fileId=file_id)
-            file_stream = BytesIO(request_file.execute())
-            wb = openpyxl.load_workbook(file_stream, data_only=True)
-            return wb, None
-        except Exception:
-            # スプレッドシートエクスポート試行
+
+        # 1. メタデータから mimeType を取得
+        file_meta = service.files().get(fileId=file_id, fields='mimeType, name').execute()
+        mime_type = file_meta.get('mimeType', '')
+
+        # 2. mimeType に応じた適切な取得処理
+        if mime_type == 'application/vnd.google-apps.spreadsheet':
             request_file = service.files().export_media(
                 fileId=file_id,
                 mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
-            file_stream = BytesIO(request_file.execute())
-            wb = openpyxl.load_workbook(file_stream, data_only=True)
-            return wb, None
+        else:
+            request_file = service.files().get_media(fileId=file_id)
+
+        file_stream = BytesIO(request_file.execute())
+        wb = openpyxl.load_workbook(file_stream, data_only=True)
+        return wb, None
+
     except Exception as e:
-        return None, f"認証・ダウンロードエラー: {str(e)}"
+        return None, f"Driveアクセスエラー: {str(e)}"
 
 def find_student_data(wb, name_query, month_query):
     target_sheet = None
